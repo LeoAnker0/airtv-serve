@@ -1,0 +1,32 @@
+version: '3.8'
+
+services:
+  # For Exposing apis and file hosting to the internet
+  AIRTV_cloudflared:
+    image: cloudflare/cloudflared:latest
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARED_TOKEN}
+    networks:
+      - tunnel
+
+  AIRTV_reverse_proxy:
+    image: nginx:latest
+    container_name: reverse_proxy
+    volumes:
+      - ./conf/nginx.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - "80:80"
+    depends_on:
+      - AIRTV_api
+      - AIRTV_host
+
+  AIRTV_api:
+    image: your_domain_image
+    container_name: AIRTV_api
+    ports:
+      - "8000:8000"
+
+  AIRTV_host:
+    image: your_web_image
+    container_name: AIRTV_host
+    ports:
+      - "8080:80"
