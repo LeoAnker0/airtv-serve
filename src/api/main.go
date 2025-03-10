@@ -4,6 +4,7 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/go-resty/resty/v2"
 	"github.com/gorilla/mux"
+	"github.com/gorilla/handlers"
 	"encoding/json"
 	"database/sql"
 	"net/http"
@@ -14,6 +15,13 @@ import (
 
 
 )
+
+func enableCORS(router *mux.Router) {
+	headersOk := handlers.AllowedHeaders([]string{"X-Requested-With", "Content-Type", "Authorization"})
+	originsOk := handlers.AllowedOrigins([]string{"*"}) // Allow all origins (or specify your frontend domain)
+	methodsOk := handlers.AllowedMethods([]string{"GET", "POST", "PUT", "DELETE", "OPTIONS"})
+	router.Use(handlers.CORS(headersOk, originsOk, methodsOk))
+}
 
 /*
 
@@ -170,6 +178,8 @@ func main() {
 	defer db.Close()  // Close when program exits
 
 	r := mux.NewRouter()
+
+	enableCORS(r)
 
 	// Create a subrouter for /api/v1/http
 	apiV1 := r.PathPrefix("/api/v1/http").Subrouter()
