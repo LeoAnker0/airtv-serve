@@ -204,7 +204,9 @@ func main() {
 	apiV1.HandleFunc("/atvas/films/{year}", getAtvasFilms).Methods("GET")
     apiV1.HandleFunc("/atvas/years", getAtvasYears).Methods("GET")
     apiV1.HandleFunc("/kit/assets", getKitList).Methods("GET")
-	//apiV1.HandleFunc("/users/{id}", getUser).Methods("GET")
+    apiV1.HandleFunc("/kit/authenticate/{studentnumber}", authenticateUser).Methods("GET")
+    apiV1.HandleFunc("/kit/checkout", handleCheckout).Methods("POST")
+	//apiV1.HandleFunc("/users", getUsers).Methods("GET")
 
 	apiInternalV1.HandleFunc("/refreshData", updateDatabase).Methods("GET")
 
@@ -271,6 +273,7 @@ func queryTableWithFilter(w http.ResponseWriter, r *http.Request, tableName stri
     w.WriteHeader(http.StatusOK)
     json.NewEncoder(w).Encode(results)
 }
+
 
 
 // Refresh data handler
@@ -372,6 +375,57 @@ func getCommittee(w http.ResponseWriter, r *http.Request) {
     queryTable(w, r, "Committee_Members")
 }
 
+func authenticateUser(w http.ResponseWriter, r *http.Request) {
+    vars := mux.Vars(r)
+    studentNumber := vars["studentnumber"]
+
+    // Validate input
+    if studentNumber == "" {
+        http.Error(w, "Student number is required", http.StatusBadRequest)
+        return
+    }
+
+    // Query the database
+    query := `
+        SELECT "Membership Status" 
+        FROM "Users" 
+        WHERE "Student Number" = ?
+        LIMIT 1
+    `
+
+    var membershipStatus sql.NullBool
+    err := db.QueryRow(query, studentNumber).Scan(&membershipStatus)
+    
+    if err != nil {
+        if err == sql.ErrNoRows {
+            http.Error(w, "User not found", http.StatusNotFound)
+        } else {
+            http.Error(w, fmt.Sprintf("Database error: %v", err), http.StatusInternalServerError)
+        }
+        return
+    }
+
+    // Handle null membership status
+    if !membershipStatus.Valid {
+        http.Error(w, "Membership status not set for user", http.StatusForbidden)
+        return
+    }
+
+    // Check membership status
+    if !membershipStatus.Bool {
+        http.Error(w, "Membership is not active", http.StatusForbidden)
+        return
+    }
+
+    // If we get here, authentication is successful
+    w.Header().Set("Content-Type", "application/json")
+    w.WriteHeader(http.StatusOK)
+    json.NewEncoder(w).Encode(map[string]interface{}{
+        "authenticated": true,
+        "message":       "User authenticated successfully",
+    })
+}
+
 func getAtvasFilms(w http.ResponseWriter, r *http.Request) {
     vars := mux.Vars(r)
     year := vars["year"]
@@ -390,6 +444,10 @@ func getAtvasYears(w http.ResponseWriter, r *http.Request) {
     queryTable(w, r, "Years")
 }
 
+func getUsers(w http.ResponseWriter, r *http.Request) {
+    queryTable(w, r, "Users")
+}
+
 func getKitList(w http.ResponseWriter, r *http.Request) {
     queryTable(w, r, "Assets")
 }
@@ -398,6 +456,88 @@ func updateDatabase(w http.ResponseWriter, r *http.Request) {
     refreshAllData()
     w.WriteHeader(http.StatusOK)
     fmt.Fprintln(w, "All tables updated successfully")
+}
+
+func handleCheckout(w http.ResponseWriter, r *http.Request) {
+    // Verify the request method
+    if r.Method != http.MethodPost {
+        http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+        return
+    }
+
+    // Parse the request body
+    var requestBody struct {
+        Records []struct {
+            Fields struct {
+                StudentNumber string   `json:"Student Number"`
+                Assets        []string `json:"Assets"`
+                StartDate     string   `json:"Start Date"`
+                EndDate       string   `json:"End Date"`
+            } `json:"fields"`
+        } `json:"records"`
+    }
+
+    if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
+        http.Error(w, fmt.Sprintf("Error parsing request body: %v", err), http.StatusBadRequest)
+        return
+    }
+
+    // Validate we have exactly one record
+    if len(requestBody.Records) != 1 {
+        http.Error(w, "Expected exactly one record", http.StatusBadRequest)
+        return
+    }
+
+    // Extract the fields
+    fields := requestBody.Records[0].Fields
+    studentNumber := fields.StudentNumber
+    assets := fields.Assets
+    startDate := fields.StartDate
+    endDate := fields.EndDate
+
+    // First verify the student
+    query := `
+        SELECT "Membership Status" 
+        FROM "Users" 
+        WHERE "Student Number" = ?
+        LIMIT 1
+    `
+
+    var membershipStatus sql.NullBool
+    err := db.QueryRow(query, studentNumber).Scan(&membershipStatus)
+    
+    if err != nil {
+        if err == sql.ErrNoRows {
+            http.Error(w, "User not found", http.StatusNotFound)
+        } else {
+            http.Error(w, fmt.Sprintf("Database error: %v", err), http.StatusInternalServerError)
+        }
+        return
+    }
+
+    if !membershipStatus.Valid || !membershipStatus.Bool {
+        http.Error(w, "Membership is not active", http.StatusForbidden)
+        return
+    }
+
+    // If we get here, the student is verified
+    // Print the checkout details
+    fmt.Println("Checkout Details:")
+    fmt.Printf("Student Number: %s\n", studentNumber)
+    fmt.Printf("Start Date: %s\n", startDate)
+    fmt.Printf("End Date: %s\n", endDate)
+    fmt.Println("Assets:")
+    for _, asset := range assets {
+        fmt.Printf(" - %s\n", asset)
+    }
+
+    // Return success response
+    w.Header().Set("Content-Type", "application/json")
+    w.WriteHeader(http.StatusOK)
+    json.NewEncoder(w).Encode(map[string]interface{}{
+        "success": true,
+        "message": "Checkout processed successfully",
+    })
 }
 
 //func getUser(w http.ResponseWriter, r *http.Request) {
