@@ -52,6 +52,19 @@ const (
 	DbFile           = "./airtable.db"  // Single database file
 )
 
+type BaseConfig struct {
+    BaseIDEnvVar string
+    TableName    string
+}
+
+var bases = []BaseConfig{
+    {BaseIDEnvVar: "AIRTABLE_BASE_ID_COMMITTEE", TableName: "Committee_Members"},
+    {BaseIDEnvVar: "AIRTABLE_BASE_ID_ATVA", TableName: "Years"},
+    {BaseIDEnvVar: "AIRTABLE_BASE_ID_ATVA", TableName: "Films"},
+    {BaseIDEnvVar: "AIRTABLE_BASE_ID_KIT", TableName: "Assets"},
+    {BaseIDEnvVar: "AIRTABLE_BASE_ID_KIT", TableName: "Users"},
+}
+
 var (
 	db *sql.DB  // Global database connection
 )
@@ -103,72 +116,71 @@ func getAllFields(records []AirtableRecord) map[string]bool {
 
 // Initialize database connection and refresh data
 func initDatabase() {
-	var err error
-	// Create persistent database connection
-	db, err = sql.Open("sqlite3", DbFile)
-	if err != nil {
-		log.Fatalf("Error opening database: %v", err)
-	}
-	
-	// Ensure table exists
-	if err := createTable(TableCommittee); err != nil {
-		log.Fatalf("Error creating table: %v", err)
-	}
-	
-	// Initial data load
-	refreshCommitteeData()
+    var err error
+    // Use in-memory SQLite database
+    db, err = sql.Open("sqlite3", "file::memory:?cache=shared")
+    if err != nil {
+        log.Fatalf("Error opening database: %v", err)
+    }
+
+    // Create tables for all bases
+    for _, base := range bases {
+        baseID := os.Getenv(base.BaseIDEnvVar)
+        if baseID == "" {
+            log.Fatalf("Environment variable %s not set", base.BaseIDEnvVar)
+        }
+        if err := createTable(baseID, base.TableName); err != nil {
+            log.Fatalf("Error creating table %s: %v", base.TableName, err)
+        }
+    }
+
+    // Initial data load for all tables
+    refreshAllData()
 }
 
 // Create table with dynamic schema
-func createTable(tableName string) error {
-	// First fetch sample data to determine fields
-	records, err := fetchAirtableData(
-		os.Getenv("AIRTABLE_BASE_ID_COMMITTEE"),
-		tableName,
-		os.Getenv("AIRTABLE_PAT"),
-	)
-	if err != nil {
-		return err
-	}
+func createTable(baseID, tableName string) error {
+    records, err := fetchAirtableData(baseID, tableName, os.Getenv("AIRTABLE_PAT"))
+    if err != nil {
+        return err
+    }
 
-	allFields := getAllFields(records)
-	
-	// Build CREATE TABLE query
-	query := fmt.Sprintf(`CREATE TABLE IF NOT EXISTS "%s" (id INTEGER PRIMARY KEY AUTOINCREMENT`, tableName)
-	for field := range allFields {
-		query += fmt.Sprintf(`, "%s" TEXT`, field)
-	}
-	query += ");"
+    allFields := getAllFields(records)
 
-	_, err = db.Exec(query)
-	return err
+    query := fmt.Sprintf(`CREATE TABLE IF NOT EXISTS "%s" (id INTEGER PRIMARY KEY AUTOINCREMENT`, tableName)
+    for field := range allFields {
+        query += fmt.Sprintf(`, "%s" TEXT`, field)
+    }
+    query += ");"
+
+    _, err = db.Exec(query)
+    return err
 }
 
-func insertDynamicRecord(db *sql.DB, tableName string, allFields map[string]bool, record AirtableRecord) error {
-	// Prepare columns and values for all possible fields
-	columns := []string{}
-	placeholders := []string{}
-	values := []interface{}{}
+func insertDynamicRecord(tx *sql.Tx, tableName string, allFields map[string]bool, record AirtableRecord) error {
+    columns := []string{}
+    placeholders := []string{}
+    values := []interface{}{}
 
-	for field := range allFields {
-		columns = append(columns, fmt.Sprintf(`"%s"`, field))
-		if val, exists := record.Fields[field]; exists {
-			placeholders = append(placeholders, "?")
-			values = append(values, fmt.Sprintf("%v", val))
-		} else {
-			placeholders = append(placeholders, "NULL")
-		}
-	}
+    for field := range allFields {
+        columns = append(columns, fmt.Sprintf(`"%s"`, field))
+        if val, exists := record.Fields[field]; exists {
+            placeholders = append(placeholders, "?")
+            values = append(values, fmt.Sprintf("%v", val))
+        } else {
+            placeholders = append(placeholders, "NULL")
+        }
+    }
 
-	query := fmt.Sprintf(
-		`INSERT INTO "%s" (%s) VALUES (%s);`,
-		tableName,
-		strings.Join(columns, ", "),
-		strings.Join(placeholders, ", "),
-	)
+    query := fmt.Sprintf(
+        `INSERT INTO "%s" (%s) VALUES (%s);`,
+        tableName,
+        strings.Join(columns, ", "),
+        strings.Join(placeholders, ", "),
+    )
 
-	_, err := db.Exec(query, values...)
-	return err
+    _, err := tx.Exec(query, values...)
+    return err
 }
 
 
@@ -178,19 +190,20 @@ func main() {
 	defer db.Close()  // Close when program exits
 
 	r := mux.NewRouter()
-
 	enableCORS(r)
 
 	// Create a subrouter for /api/v1/http
 	apiV1 := r.PathPrefix("/api/v1/http").Subrouter()
 	apiInternalV1 := r.PathPrefix("/api/v1/internal").Subrouter()
 
-	// Middleware for the /api/v1/http group
 	apiV1.Use(loggingMiddleware)
 	apiInternalV1.Use(loggingMiddleware)
 
 	// Routes under /api/v1/http
 	apiV1.HandleFunc("/committee", getCommittee).Methods("GET")
+	apiV1.HandleFunc("/atvas/films/{year}", getAtvasFilms).Methods("GET")
+    apiV1.HandleFunc("/atvas/years", getAtvasYears).Methods("GET")
+    apiV1.HandleFunc("/kit/assets", getKitList).Methods("GET")
 	//apiV1.HandleFunc("/users/{id}", getUser).Methods("GET")
 
 	apiInternalV1.HandleFunc("/refreshData", updateDatabase).Methods("GET")
@@ -209,130 +222,182 @@ func loggingMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+func queryTableWithFilter(w http.ResponseWriter, r *http.Request, tableName string, whereClause string, args ...interface{}) {
+    query := fmt.Sprintf(`SELECT * FROM "%s" WHERE %s`, tableName, whereClause)
+    
+    rows, err := db.Query(query, args...)
+    if err != nil {
+        http.Error(w, fmt.Sprintf("Error querying database: %v", err), http.StatusInternalServerError)
+        return
+    }
+    defer rows.Close()
+
+    // Rest of the existing queryTable logic...
+    columns, err := rows.Columns()
+    if err != nil {
+        http.Error(w, fmt.Sprintf("Error getting columns: %v", err), http.StatusInternalServerError)
+        return
+    }
+
+    var results []map[string]interface{}
+
+    for rows.Next() {
+        values := make([]interface{}, len(columns))
+        valuePtrs := make([]interface{}, len(columns))
+        for i := range columns {
+            valuePtrs[i] = &values[i]
+        }
+
+        if err := rows.Scan(valuePtrs...); err != nil {
+            http.Error(w, fmt.Sprintf("Error scanning row: %v", err), http.StatusInternalServerError)
+            return
+        }
+
+        entry := make(map[string]interface{})
+        for i, col := range columns {
+            val := values[i]
+            entry[col] = val
+        }
+
+        results = append(results, entry)
+    }
+
+    if err = rows.Err(); err != nil {
+        http.Error(w, fmt.Sprintf("Row iteration error: %v", err), http.StatusInternalServerError)
+        return
+    }
+
+    w.Header().Set("Content-Type", "application/json")
+    w.WriteHeader(http.StatusOK)
+    json.NewEncoder(w).Encode(results)
+}
+
 
 // Refresh data handler
-func refreshCommitteeData() {
-	// Fetch fresh data
-	records, err := fetchAirtableData(
-		os.Getenv("AIRTABLE_BASE_ID_COMMITTEE"),
-		TableCommittee,
-		os.Getenv("AIRTABLE_PAT"),
-	)
-	if err != nil {
-		log.Printf("Error fetching data: %v", err)
-		return
-	}
+func refreshAllData() {
+    for _, base := range bases {
+        baseID := os.Getenv(base.BaseIDEnvVar)
+        if baseID == "" {
+            log.Printf("Environment variable %s not set, skipping table %s", base.BaseIDEnvVar, base.TableName)
+            continue
+        }
 
-	// Clear existing data
-	_, err = db.Exec(fmt.Sprintf(`DELETE FROM "%s"`, TableCommittee))
-	if err != nil {
-		log.Printf("Error clearing table: %v", err)
-		return
-	}
+        records, err := fetchAirtableData(baseID, base.TableName, os.Getenv("AIRTABLE_PAT"))
+        if err != nil {
+            log.Printf("Error fetching data for table %s: %v", base.TableName, err)
+            continue
+        }
 
-	// Insert new records
-	tx, err := db.Begin()
-	if err != nil {
-		log.Printf("Error starting transaction: %v", err)
-		return
-	}
+        // Clear existing data
+        _, err = db.Exec(fmt.Sprintf(`DELETE FROM "%s"`, base.TableName))
+        if err != nil {
+            log.Printf("Error clearing table %s: %v", base.TableName, err)
+            continue
+        }
 
-	for _, record := range records {
-		columns := []string{}
-		placeholders := []string{}
-		values := []interface{}{}
-		
-		for field, value := range record.Fields {
-			columns = append(columns, fmt.Sprintf(`"%s"`, field))
-			placeholders = append(placeholders, "?")
-			values = append(values, fmt.Sprintf("%v", value))
-		}
-		
-		stmt := fmt.Sprintf(
-			`INSERT INTO "%s" (%s) VALUES (%s)`,
-			TableCommittee,
-			strings.Join(columns, ", "),
-			strings.Join(placeholders, ", "),
-		)
-		
-		_, err := tx.Exec(stmt, values...)
-		if err != nil {
-			tx.Rollback()
-			log.Printf("Error inserting record: %v", err)
-			return
-		}
-	}
-	
-	tx.Commit()
-	log.Println("Data refresh complete")
+        // Insert new records
+        allFields := getAllFields(records)
+        tx, err := db.Begin()
+        if err != nil {
+            log.Printf("Error starting transaction for table %s: %v", base.TableName, err)
+            continue
+        }
+
+        for _, record := range records {
+            if err := insertDynamicRecord(tx, base.TableName, allFields, record); err != nil {
+                tx.Rollback()
+                log.Printf("Error inserting record into table %s: %v", base.TableName, err)
+                continue
+            }
+        }
+
+        if err := tx.Commit(); err != nil {
+            log.Printf("Error committing transaction for table %s: %v", base.TableName, err)
+        } else {
+            log.Printf("Data refresh complete for table %s", base.TableName)
+        }
+    }
+}
+
+// General handler for querying any table
+func queryTable(w http.ResponseWriter, r *http.Request, tableName string) {
+    rows, err := db.Query(fmt.Sprintf(`SELECT * FROM "%s"`, tableName))
+    if err != nil {
+        http.Error(w, fmt.Sprintf("Error querying table %s: %v", tableName, err), http.StatusInternalServerError)
+        return
+    }
+    defer rows.Close()
+
+    columns, err := rows.Columns()
+    if err != nil {
+        http.Error(w, fmt.Sprintf("Error getting columns: %v", err), http.StatusInternalServerError)
+        return
+    }
+
+    var results []map[string]interface{}
+
+    for rows.Next() {
+        values := make([]interface{}, len(columns))
+        valuePtrs := make([]interface{}, len(columns))
+        for i := range columns {
+            valuePtrs[i] = &values[i]
+        }
+
+        if err := rows.Scan(valuePtrs...); err != nil {
+            http.Error(w, fmt.Sprintf("Error scanning row: %v", err), http.StatusInternalServerError)
+            return
+        }
+
+        entry := make(map[string]interface{})
+        for i, col := range columns {
+            val := values[i]
+            entry[col] = val
+        }
+
+        results = append(results, entry)
+    }
+
+    if err = rows.Err(); err != nil {
+        http.Error(w, fmt.Sprintf("Row iteration error: %v", err), http.StatusInternalServerError)
+        return
+    }
+
+    w.Header().Set("Content-Type", "application/json")
+    w.WriteHeader(http.StatusOK)
+    json.NewEncoder(w).Encode(results)
 }
 
 // Handler functions
-// Handler functions
 func getCommittee(w http.ResponseWriter, r *http.Request) {
-	rows, err := db.Query(fmt.Sprintf(`SELECT * FROM "%s"`, TableCommittee))
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Error querying database: %v", err), http.StatusInternalServerError)
-		return
-	}
-	defer rows.Close()
+    queryTable(w, r, "Committee_Members")
+}
 
-	// Get column names
-	columns, err := rows.Columns()
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Error getting columns: %v", err), http.StatusInternalServerError)
-		return
-	}
+func getAtvasFilms(w http.ResponseWriter, r *http.Request) {
+    vars := mux.Vars(r)
+    year := vars["year"]
+    
+    // Validate year parameter
+    if year == "" {
+        http.Error(w, "Year parameter is required", http.StatusBadRequest)
+        return
+    }
 
-	// Store results
-	var results []map[string]interface{}
+    // Use the existing queryTable function with a WHERE clause
+    queryTableWithFilter(w, r, "Films", "Year = ?", year)
+}
 
-	for rows.Next() {
-		// Create slice to hold values
-		values := make([]interface{}, len(columns))
-		valuePtrs := make([]interface{}, len(columns))
-		for i := range columns {
-			valuePtrs[i] = &values[i]
-		}
+func getAtvasYears(w http.ResponseWriter, r *http.Request) {
+    queryTable(w, r, "Years")
+}
 
-		// Scan row into values
-		if err := rows.Scan(valuePtrs...); err != nil {
-			http.Error(w, fmt.Sprintf("Error scanning row: %v", err), http.StatusInternalServerError)
-			return
-		}
-
-		// Convert to map
-		entry := make(map[string]interface{})
-		for i, col := range columns {
-			val := values[i]
-			entry[col] = val
-		}
-
-		results = append(results, entry)
-	}
-
-	// Check for errors during iteration
-	if err = rows.Err(); err != nil {
-		http.Error(w, fmt.Sprintf("Row iteration error: %v", err), http.StatusInternalServerError)
-		return
-	}
-
-	// Set JSON headers and encode response
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	
-	// For testing: print JSON to console
-	//jsonData, _ := json.MarshalIndent(results, "", "  ")
-	//fmt.Println("Response JSON:", string(jsonData))
-	
-	// Send response
-	json.NewEncoder(w).Encode(results)
+func getKitList(w http.ResponseWriter, r *http.Request) {
+    queryTable(w, r, "Assets")
 }
 
 func updateDatabase(w http.ResponseWriter, r *http.Request) {
-	refreshCommitteeData()
-	w.WriteHeader(http.StatusOK)
-	fmt.Fprintln(w, "Update Databse")
+    refreshAllData()
+    w.WriteHeader(http.StatusOK)
+    fmt.Fprintln(w, "All tables updated successfully")
 }
 
 //func getUser(w http.ResponseWriter, r *http.Request) {
