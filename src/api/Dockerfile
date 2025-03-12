@@ -2,12 +2,12 @@ FROM golang:1.23
 
 WORKDIR /app
 
-# Copy everything
-COPY . .
+# Copy only the necessary files for module download
+COPY go.mod go.sum ./
+RUN go mod download
 
-# Initialize modules if needed
-RUN test -f go.mod || go mod init api
-RUN go mod tidy
+# Copy the rest of the application
+COPY . .
 
 # Build and run
 RUN go build -o api .
