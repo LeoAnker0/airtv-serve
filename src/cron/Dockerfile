@@ -6,10 +6,10 @@ WORKDIR /app
 COPY . .
 
 # Initialize modules if needed
-RUN test -f go.mod || go mod init api
+RUN test -f go.mod || go mod init cron
 RUN go mod tidy
 
 # Build and run
-RUN go build -o api .
+RUN go build -o cron .
 EXPOSE 8080
-ENTRYPOINT ["./api"]
+ENTRYPOINT ["./cron"]
