@@ -6,7 +6,7 @@ WORKDIR /app
 COPY . .
 
 # Initialize modules if needed
-RUN test -f go.mod || go mod init api
+RUN go mod init api
 RUN go mod tidy
 
 # Build and run
