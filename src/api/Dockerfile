@@ -6,7 +6,6 @@ WORKDIR /app
 COPY . .
 
 # Initialize modules if needed
-RUN test -f go.mod || go mod init github.com/yourusername/airtv/api
 RUN go mod tidy
 
 # Build and run
