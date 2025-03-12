@@ -1,4 +1,4 @@
-FROM golang:1.23.0
+FROM golang:1.23
 
 WORKDIR /app
 
@@ -6,6 +6,7 @@ WORKDIR /app
 COPY . .
 
 # Initialize modules if needed
+RUN test -f go.mod || go mod init api
 RUN go mod tidy
 
 # Build and run
