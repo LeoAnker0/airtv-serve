@@ -23,124 +23,107 @@ func enableCORS(router *mux.Router) {
 	router.Use(handlers.CORS(headersOk, originsOk, methodsOk))
 }
 
-/*
-
-Needed:
-	update `getDataRefreshDatabase()` so that it is able of pulling the data for the three differenet databases, 
-		and then storing it inside of a sqlite memory database
-	update 'getCommittee' route so that we can test that we have the proper data inside of our database and that 
-		this is a valid approach
-	create the functions for 'get atvas general' and 'get atvas year{year}'. Again using the same dataapproach 
-		as for the previous one
-	create a function that will serve the kit. We can have one for giving the kit data, and another for getting 
-		the form response, and then sending it on to wherever we decided to do with that
-
-
-*/
-
-type AirtableResponse struct {
-	Records []AirtableRecord `json:"records"`
-	Offset  string           `json:"offset"`
-}
-
-type AirtableRecord struct {
-	Fields map[string]interface{} `json:"fields"`
-}
-
-const (
-	TableCommittee   = "Committee_Members"
-	DbFile           = "./airtable.db"  // Single database file
-)
-
 type BaseConfig struct {
-    BaseIDEnvVar string
-    TableName    string
+    EnvVar     string // Environment variable holding table ID
+    TableName  string // Local SQLite table name
 }
 
 var bases = []BaseConfig{
-    {BaseIDEnvVar: "AIRTABLE_BASE_ID_COMMITTEE", TableName: "Committee_Members"},
-    {BaseIDEnvVar: "AIRTABLE_BASE_ID_ATVA", TableName: "Years"},
-    {BaseIDEnvVar: "AIRTABLE_BASE_ID_ATVA", TableName: "Films"},
-    {BaseIDEnvVar: "AIRTABLE_BASE_ID_KIT", TableName: "Assets"},
-    {BaseIDEnvVar: "AIRTABLE_BASE_ID_KIT", TableName: "Users"},
+    {EnvVar: "NOCODB_TABLE_COMMITTEE", TableName: "Committee_Members"},
+    {EnvVar: "NOCODB_TABLE_YEARS", TableName: "Years"},
+    {EnvVar: "NOCODB_TABLE_FILMS", TableName: "Films"},
+    {EnvVar: "NOCODB_TABLE_ASSETS", TableName: "Assets"},
+    {EnvVar: "NOCODB_TABLE_USERS", TableName: "Users"},
+    {EnvVar: "NOCODB_TABLE_CHECKOUTS", TableName: "Checkouts"},
 }
 
 var (
 	db *sql.DB  // Global database connection
 )
 
-func fetchAirtableData(baseID, tableName, apiKey string) ([]AirtableRecord, error) {
-	client := resty.New()
-	url := fmt.Sprintf("https://api.airtable.com/v0/%s/%s", baseID, tableName)
-	var allRecords []AirtableRecord
-	offset := ""
+func fetchNocoDBData(tableId, apiKey string) ([]map[string]interface{}, error) {
+    client := resty.New()
+    url := fmt.Sprintf("https://db.la0.uk/api/v2/tables/%s/records", tableId)
+    var allRecords []map[string]interface{}
+    limit := 100  // Matches your API examples
+    offset := 0
 
-	for {
-		resp, err := client.R().
-			SetHeader("Authorization", "Bearer "+apiKey).
-			SetQueryParam("offset", offset).
-			Get(url)
+    for {
+        resp, err := client.R().
+            SetHeader("xc-token", apiKey).
+            SetQueryParams(map[string]string{
+                "offset": fmt.Sprintf("%d", offset),
+                "limit":  fmt.Sprintf("%d", limit),
+            }).
+            Get(url)
 
-		if err != nil {
-			return nil, fmt.Errorf("error fetching data from Airtable: %v", err)
-		}
+        if err != nil {
+            return nil, fmt.Errorf("error fetching data from NocoDB: %v", err)
+        }
 
-		var airtableResponse AirtableResponse
-		err = json.Unmarshal(resp.Body(), &airtableResponse)
-		if err != nil {
-			return nil, fmt.Errorf("error parsing Airtable response: %v", err)
-		}
+        var result struct {
+            List     []map[string]interface{} `json:"list"`
+            PageInfo struct {
+                IsLastPage bool `json:"isLastPage"`
+            } `json:"pageInfo"`
+        }
 
-		allRecords = append(allRecords, airtableResponse.Records...)
+        if err := json.Unmarshal(resp.Body(), &result); err != nil {
+            return nil, fmt.Errorf("error parsing NocoDB response: %v", err)
+        }
 
-		// Check if there are more records to fetch
-		if airtableResponse.Offset == "" {
-			break
-		}
-		offset = airtableResponse.Offset
-	}
+        allRecords = append(allRecords, result.List...)
 
-	return allRecords, nil
+        if result.PageInfo.IsLastPage {
+            break
+        }
+        offset += limit
+    }
+
+    return allRecords, nil
 }
 
 // Collect all unique field names from all records
-func getAllFields(records []AirtableRecord) map[string]bool {
-	allFields := make(map[string]bool)
-	for _, record := range records {
-		for field := range record.Fields {
-			allFields[field] = true
-		}
-	}
-	return allFields
+func getAllFields(records []map[string]interface{}) map[string]bool {
+    allFields := make(map[string]bool)
+    for _, record := range records {
+        for key := range record {
+            // Handle NocoDB's system fields
+            if key == "Id" || key == "CreatedAt" || key == "UpdatedAt" {
+                continue
+            }
+            allFields[key] = true
+        }
+    }
+    return allFields
 }
 
 // Initialize database connection and refresh data
 func initDatabase() {
     var err error
-    // Use in-memory SQLite database
     db, err = sql.Open("sqlite3", "file::memory:?cache=shared")
     if err != nil {
         log.Fatalf("Error opening database: %v", err)
     }
 
-    // Create tables for all bases
     for _, base := range bases {
-        baseID := os.Getenv(base.BaseIDEnvVar)
-        if baseID == "" {
-            log.Fatalf("Environment variable %s not set", base.BaseIDEnvVar)
+        tableId := os.Getenv(base.EnvVar)
+        if tableId == "" {
+            log.Fatalf("Environment variable %s not set", base.EnvVar)
         }
-        if err := createTable(baseID, base.TableName); err != nil {
+        
+        // Create SQLite table with original table name
+        if err := createTable(tableId, base.TableName); err != nil {
             log.Fatalf("Error creating table %s: %v", base.TableName, err)
         }
     }
 
-    // Initial data load for all tables
     refreshAllData()
 }
 
 // Create table with dynamic schema
 func createTable(baseID, tableName string) error {
-    records, err := fetchAirtableData(baseID, tableName, os.Getenv("AIRTABLE_PAT"))
+    records, err := fetchNocoDBData(baseID, os.Getenv("NOCODB_PAT"))
     if err != nil {
         return err
     }
@@ -157,14 +140,14 @@ func createTable(baseID, tableName string) error {
     return err
 }
 
-func insertDynamicRecord(tx *sql.Tx, tableName string, allFields map[string]bool, record AirtableRecord) error {
+func insertDynamicRecord(tx *sql.Tx, tableName string, allFields map[string]bool, record map[string]interface{}) error {
     columns := []string{}
     placeholders := []string{}
     values := []interface{}{}
 
     for field := range allFields {
         columns = append(columns, fmt.Sprintf(`"%s"`, field))
-        if val, exists := record.Fields[field]; exists {
+        if val, exists := record[field]; exists {
             placeholders = append(placeholders, "?")
             values = append(values, fmt.Sprintf("%v", val))
         } else {
@@ -278,18 +261,24 @@ func queryTableWithFilter(w http.ResponseWriter, r *http.Request, tableName stri
 
 // Refresh data handler
 func refreshAllData() {
+    //fmt.Println("Starting data refresh...")
+    
     for _, base := range bases {
-        baseID := os.Getenv(base.BaseIDEnvVar)
-        if baseID == "" {
-            log.Printf("Environment variable %s not set, skipping table %s", base.BaseIDEnvVar, base.TableName)
+        tableId := os.Getenv(base.EnvVar)
+        if tableId == "" {
+            log.Printf("Skipping %s - missing table ID", base.TableName)
             continue
         }
 
-        records, err := fetchAirtableData(baseID, base.TableName, os.Getenv("AIRTABLE_PAT"))
+        log.Printf("Refreshing %s (NocoDB Table ID: %s)", base.TableName, tableId)
+        
+        records, err := fetchNocoDBData(tableId, os.Getenv("NOCODB_PAT"))
         if err != nil {
-            log.Printf("Error fetching data for table %s: %v", base.TableName, err)
+            log.Printf("Error fetching %s: %v", base.TableName, err)
             continue
         }
+
+        //log.Printf("Fetched %d records for %s", len(records), base.TableName)
 
         // Clear existing data
         _, err = db.Exec(fmt.Sprintf(`DELETE FROM "%s"`, base.TableName))
@@ -302,24 +291,33 @@ func refreshAllData() {
         allFields := getAllFields(records)
         tx, err := db.Begin()
         if err != nil {
-            log.Printf("Error starting transaction for table %s: %v", base.TableName, err)
+            log.Printf("Error starting transaction: %v", err)
             continue
         }
 
         for _, record := range records {
-            if err := insertDynamicRecord(tx, base.TableName, allFields, record); err != nil {
+            cleanRecord := make(map[string]interface{})
+            for k, v := range record {
+                // Skip system fields
+                if k == "Id" || k == "CreatedAt" || k == "UpdatedAt" {
+                    continue
+                }
+                cleanRecord[k] = v
+            }
+
+            if err := insertDynamicRecord(tx, base.TableName, allFields, cleanRecord); err != nil {
                 tx.Rollback()
-                log.Printf("Error inserting record into table %s: %v", base.TableName, err)
-                continue
+                log.Printf("Error inserting record: %v", err)
+                break
             }
         }
 
         if err := tx.Commit(); err != nil {
-            log.Printf("Error committing transaction for table %s: %v", base.TableName, err)
-        } else {
-            log.Printf("Data refresh complete for table %s", base.TableName)
+            log.Printf("Commit error: %v", err)
         }
     }
+    
+    fmt.Println("Data refresh complete")
 }
 
 // General handler for querying any table
@@ -539,10 +537,3 @@ func handleCheckout(w http.ResponseWriter, r *http.Request) {
         "message": "Checkout processed successfully",
     })
 }
-
-//func getUser(w http.ResponseWriter, r *http.Request) {
-//	vars := mux.Vars(r)
-//	id := vars["id"]
-//	w.WriteHeader(http.StatusOK)
-//	fmt.Fprintf(w, "User ID: %s\n", id)
-//}
