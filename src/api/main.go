@@ -35,6 +35,7 @@ var bases = []BaseConfig{
     {EnvVar: "NOCODB_TABLE_ASSETS", TableName: "Assets"},
     {EnvVar: "NOCODB_TABLE_USERS", TableName: "Users"},
     {EnvVar: "NOCODB_TABLE_CHECKOUTS", TableName: "Checkouts"},
+    {EnvVar: "NOCODB_TABLE_ANNOUNCEMENTS", TableName: "Announcements"},
 }
 
 var (
@@ -184,6 +185,7 @@ func main() {
 
 	// Routes under /api/v1/http
 	apiV1.HandleFunc("/committee", getCommittee).Methods("GET")
+    apiV1.HandleFunc("/announcements", getAnnouncements).Methods("GET")
 	apiV1.HandleFunc("/atvas/films/{year}", getAtvasFilms).Methods("GET")
     apiV1.HandleFunc("/atvas/years", getAtvasYears).Methods("GET")
     apiV1.HandleFunc("/kit/assets", getKitList).Methods("GET")
@@ -372,6 +374,12 @@ func queryTable(w http.ResponseWriter, r *http.Request, tableName string) {
 func getCommittee(w http.ResponseWriter, r *http.Request) {
     queryTable(w, r, "Committee_Members")
 }
+
+//getAnnouncements
+func getAnnouncements(w http.ResponseWriter, r *http.Request) {
+    queryTable(w, r, "Announcements")
+}
+
 
 func authenticateUser(w http.ResponseWriter, r *http.Request) {
     vars := mux.Vars(r)
